@@ -8,13 +8,13 @@ body {
 .header,
 .marketing,
 .footer {
-  padding-right: 15px;
-  padding-left: 15px;
+  /*padding-right: 15px;
+  padding-left: 15px;*/
 }
 
 /* Custom page header */
 .header {
-  padding-bottom: 20px;
+  /*padding-bottom: 20px;*/
   border-bottom: 1px solid #e5e5e5;
 }
 /* Make the masthead heading the same height as the navigation */

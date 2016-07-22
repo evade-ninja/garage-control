@@ -40,29 +40,48 @@
 #include "garage_status.h"
 #include "GarageDoorOpener.h"
 #include "wifi.h"
+#include <WiFiUdp.h>
+#include <TimeLib.h>
 
-#define DOOR_OPEN_SENSOR D3
-#define DOOR_CLOSED_SENSOR D2
-#define DOOR_RELAY D1
+#define DOOR_OPEN_SENSOR D1
+#define DOOR_CLOSED_SENSOR D5
+#define DOOR_RELAY D2
 
-#define DOOR_MOVE_DURATION 30000  //msec it takes for door to open/close
+#define DOOR_MOVE_DURATION 10  //sec it takes for door to open/close
 
 int current_state = DOOR_LOST; 
 
 const char *ssid = WIFI_SSID;
 const char *password = WIFI_SECRET;
 
-Ticker statuschecker;
+//Time service variables//
+IPAddress timeServerIP;
+const char* ntpServerName = "time.nist.gov";
 
+const int NTP_PACKET_SIZE = 48;
+unsigned int localPort = 2390;
+const int timeZone = -6;
+
+byte packetBuffer[ NTP_PACKET_SIZE];
+WiFiUDP Udp;
+
+unsigned long next_door_check = 0;
+unsigned int door_move_time = DOOR_MOVE_DURATION;
+
+//internal timer object to update status
+Ticker statuschecker;
+Ticker timeUpdater;
+
+//webserver
 ESP8266WebServer server ( 80 );
 
 const int led = 13;
 
 void handleRoot() {
-	digitalWrite ( led, 1 );
-  Serial.println(door_state_text[current_state]);
- server.send (200, "text/html", index_html);
-	digitalWrite ( led, 0 );
+	//digitalWrite ( led, 1 );
+  logEvent(door_state_text[current_state]);
+  server.send (200, "text/html", index_html);
+	//digitalWrite ( led, 0 );
 }
 
 void handleNarrowCSS(){
@@ -149,6 +168,19 @@ void setup ( void ) {
 	server.onNotFound ( handleNotFound );
 	server.begin();
 	Serial.println ( "HTTP server started" );
+
+  Udp.begin(localPort);
+  setSyncProvider(getNtpTime);
+  setSyncInterval(28800);
+
+  if(timeStatus() == timeNotSet){
+    Serial.println("time not set - init updater on 30 sec interval");
+    timeUpdater.attach(30, syncTime);
+  }
+
+  Serial.print("Time updated ");
+  Serial.println(now());
+  
 }
 
 void loop ( void ) {
@@ -210,8 +242,9 @@ void toggleDoor(){
   }
 
   //need to check the door status in now + DOOR_MOVE_DURATION
+
+  next_door_check = now() + door_move_time;
   
-  //TODO: add code to check door position after specified time
 }
 
 int getDoorState(){
@@ -219,29 +252,42 @@ int getDoorState(){
   int s_open = digitalRead(DOOR_OPEN_SENSOR);
   int s_closed = digitalRead(DOOR_CLOSED_SENSOR);  
 
+  //both sensors HIGH is always an error
+  
   if(s_closed == HIGH && s_open == HIGH){
     //should probably add a log entry or something like that
     logEvent("both sensors are high");
     current_state = DOOR_LOST;
+    return current_state;    
+  }
+
+  //has the minimum time passed to be able to check the door status?
+  if(now() < next_door_check){
+    //not enough time has passed, so don't check the status
     return current_state;
   }
 
   if(s_open == HIGH){
-    current_state = DOOR_OPEN;
+    ds_new = DOOR_OPEN;
   }
 
   if(s_closed == HIGH){
-    current_state = DOOR_CLOSED;
+    ds_new = DOOR_CLOSED;
   }
-
 
   if(s_closed == LOW && s_open == LOW){
     //should probably add a log entry or something like that
     logEvent("both sensors are low");
-    current_state = DOOR_LOST;
-    return current_state;
+    ds_new = DOOR_LOST;
   }
 
+  if(current_state == DOOR_CLOSING || current_state == DOOR_OPENING || current_state == DOOR_LOST_MOVING){
+    String sStr = "Door is now ";
+    sStr += door_status_text[ds_new];
+    logEvent(sStr);
+  }
+
+  current_state = ds_new;
   return current_state;
 }
 
@@ -250,7 +296,7 @@ void getDoorStateV(){
 }
 
 void logEvent(String event){
-  //do nothing yet
+  Serial.println(event);
 }
 
 char* levelToString(int level){
@@ -265,4 +311,63 @@ char const* getDoorStateChr(){
   return door_state_text[current_state];
 }
 
+time_t getNtpTime()
+{
+  while (Udp.parsePacket() > 0) ; // discard any previously received packets
+  logEvent("Transmit NTP Request");
+  WiFi.hostByName(ntpServerName, timeServerIP);
+  sendNTPpacket(timeServerIP);
+  uint32_t beginWait = millis();
+  while (millis() - beginWait < 1500) {
+    int size = Udp.parsePacket();
+    if (size >= NTP_PACKET_SIZE) {
+      logEvent("Receive NTP Response");
+      Udp.read(packetBuffer, NTP_PACKET_SIZE);  // read packet into the buffer
+      unsigned long secsSince1900;
+      // convert four bytes starting at location 40 to a long integer
+      secsSince1900 =  (unsigned long)packetBuffer[40] << 24;
+      secsSince1900 |= (unsigned long)packetBuffer[41] << 16;
+      secsSince1900 |= (unsigned long)packetBuffer[42] << 8;
+      secsSince1900 |= (unsigned long)packetBuffer[43];
+      return secsSince1900 - 2208988800UL + timeZone * SECS_PER_HOUR;
+    }
+  }
+  logEvent("No NTP Response :-(");
+  return 0; // return 0 if unable to get the time
+}
+
+unsigned long sendNTPpacket(IPAddress& address)
+{
+  logEvent("sending NTP packet...");
+  // set all bytes in the buffer to 0
+  memset(packetBuffer, 0, NTP_PACKET_SIZE);
+  // Initialize values needed to form NTP request
+  // (see URL above for details on the packets)
+  packetBuffer[0] = 0b11100011;   // LI, Version, Mode
+  packetBuffer[1] = 0;     // Stratum, or type of clock
+  packetBuffer[2] = 6;     // Polling Interval
+  packetBuffer[3] = 0xEC;  // Peer Clock Precision
+  // 8 bytes of zero for Root Delay & Root Dispersion
+  packetBuffer[12]  = 49;
+  packetBuffer[13]  = 0x4E;
+  packetBuffer[14]  = 49;
+  packetBuffer[15]  = 52;
+
+  // all NTP fields have been given values, now
+  // you can send a packet requesting a timestamp:
+  Udp.beginPacket(address, 123); //NTP requests are to port 123
+  Udp.write(packetBuffer, NTP_PACKET_SIZE);
+  Udp.endPacket();
+}
+
+void syncTime(){
+  if(timeStatus() != timeSet){
+    time_t newTime = getNtpTime();
+    if(newTime > 0){
+      setTime(newTime);
+      Serial.print("time now set ");
+      Serial.println(now());
+    }
+  }
+}
 
