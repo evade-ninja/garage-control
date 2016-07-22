@@ -12,5 +12,7 @@ void getDoorStateV();
 void logEvent(String event);
 char* levelToString(int level);
 char const* getDoorStateChr();
-
+time_t getNtpTime();
+unsigned long sendNTPpacket(IPAddress& address);
+void syncTime();
 

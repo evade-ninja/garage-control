@@ -7,3 +7,4 @@
 
 
 const char* door_state_text[] = {"d_confused", "d_holdon", "d_open", "d_opening", "d_closed", "d_closing"};
+const char* door_status_text[] {"confused", "moving", "open", "opening", "closed", "closing"};
